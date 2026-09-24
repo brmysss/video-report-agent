@@ -21,7 +21,8 @@ def cleanup_media(root: Path) -> None:
     try:
         keep = int(os.getenv("MEDIA_KEEP_LAST", "20"))
         days = int(os.getenv("MEDIA_MAX_AGE_DAYS", "0"))
-        if keep < 0 or days < 0:
+        trace_days = int(os.getenv("PI_TRACE_FULL_MAX_AGE_DAYS", "7"))
+        if keep < 0 or days < 0 or trace_days < 0:
             raise ValueError("media retention limits must be non-negative")
         terminal = []
         for run in root.iterdir():
@@ -37,6 +38,10 @@ def cleanup_media(root: Path) -> None:
                 continue
         cutoff = time.time() - days * 86400
         for index, (finished, run) in enumerate(sorted(terminal, reverse=True)):
+            # Only the opt-in raw stream expires; compact traces remain usable.
+            raw = run / "pi.raw.events.jsonl"
+            if trace_days and finished < time.time() - trace_days * 86400:
+                raw.unlink(missing_ok=True)
             if not ((keep and index >= keep) or (days and finished < cutoff)):
                 continue
             # Keep subtitles, metadata, report assets and all diagnostic text.

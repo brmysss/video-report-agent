@@ -8,8 +8,10 @@ import os
 import shutil
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
+from .pi_trace import compact_event
 from .report_content import fill_video_description
 
 PROJECT_ROOT = Path.cwd()
@@ -127,6 +129,9 @@ class PiRunner:
             "The supplied transcript is complete; generate a self-contained report.html. "
             "If browser tools are unavailable, report static checks honestly.",
         ]
+        trace_extension = workspace / "request_trace.ts"
+        shutil.copy2(Path(__file__).with_name("request_trace.ts"), trace_extension)
+        command.extend(["--extension", str(trace_extension)])
         if self.review:
             extension = workspace / "report_inspect.ts"
             shutil.copy2(Path(__file__).with_name("report_inspect.ts"), extension)
@@ -218,12 +223,30 @@ class PiRunner:
         )
         await process.stdin.drain()
         last_assistant = None
-        with (workspace / "pi.events.jsonl").open("wb") as log:
+        with ExitStack() as stack:
+            log = stack.enter_context((workspace / "pi.events.jsonl").open("wb"))
+            raw = (
+                stack.enter_context((workspace / "pi.raw.events.jsonl").open("wb"))
+                if os.getenv("PI_TRACE_FULL", "0") == "1" else None
+            )
             while line := await process.stdout.readline():
                 event = json.loads(line)
                 event["_trace_received_at"] = time.time()
-                log.write((json.dumps(event, ensure_ascii=False) + "\n").encode())
-                log.flush()
+                if raw is not None:
+                    raw.write((json.dumps(event, ensure_ascii=False) + "\n").encode())
+                    raw.flush()
+                if (
+                    event.get("type") == "extension_ui_request"
+                    and event.get("method") == "notify"
+                    and event.get("message", "").startswith("video-report-trace:")
+                ):
+                    timing = json.loads(event["message"].removeprefix("video-report-trace:"))
+                    timing["_trace_received_at"] = event["_trace_received_at"]
+                    event = timing
+                compact = compact_event(event)
+                if compact is not None:
+                    log.write((json.dumps(compact, ensure_ascii=False) + "\n").encode())
+                    log.flush()
                 if event.get("type") == "response" and event.get("success") is False:
                     raise PiError("ENVIRONMENT_FAILURE", event.get("error", "Pi rejected prompt"))
                 if event.get("type") == "message_end":
