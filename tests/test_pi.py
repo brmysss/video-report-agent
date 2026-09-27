@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from video_report_agent.pi import (
     PI_AGENT_DIR,
     PiError,
     PiRunner,
+    _provider_failure,
 )
 
 
@@ -33,9 +35,254 @@ class Process:
         return self.lines.pop(0) if self.lines else b""
 
 
+def provider_attempt(provider, model, request_id, *, stop_reason, error=None, age=0, settled=True):
+    requested_at = time.time() - age
+    message = {
+        "role": "assistant", "provider": provider, "model": model,
+        "stopReason": stop_reason, "timestamp": int(requested_at * 1000),
+        "responseId": f"provider-{request_id}",
+        "usage": {"input": 10, "output": 5, "totalTokens": 15,
+                  "cost": {"input": 0.001, "output": 0.002, "total": 0.003}},
+    }
+    if error:
+        message["errorMessage"] = error
+    events = [
+        {"type": "request_start", "request_id": request_id, "timestamp": requested_at,
+         "provider": provider, "model": model},
+        {"type": "message_end", "message": message},
+    ]
+    if settled:
+        events.append({"type": "agent_settled"})
+    return events
+
+
+class RecoveryInput:
+    def __init__(self, process):
+        self.process = process
+
+    def write(self, data):
+        command = json.loads(data)
+        if command["type"] == "prompt":
+            self.process.prompts.append(command["message"])
+            index = len(self.process.prompts) - 1
+            self.process.lines.extend(self.process.steps[index])
+            return
+        if command["type"] == "set_model":
+            self.process.model_commands.append(command)
+            self.process.current_model = (command["provider"], command["modelId"])
+            self.process.lines.append({
+                "type": "response", "id": command["id"], "command": "set_model",
+                "success": True,
+            })
+            return
+        raise AssertionError(f"unexpected RPC command: {command['type']}")
+
+    async def drain(self):
+        pass
+
+
+class RecoveryProcess:
+    def __init__(self, steps, workspace=None):
+        self.stdin = RecoveryInput(self)
+        self.stdout = self
+        self.lines = []
+        self.steps = steps
+        self.prompts = []
+        self.model_commands = []
+        self.current_model = None
+        self.workspace = workspace
+
+    async def readline(self):
+        return (json.dumps(self.lines.pop(0)) + "\n").encode() if self.lines else b""
+
+
 def test_default_thinking_is_low():
     assert PiRunner().thinking == "low"
     assert PiRunner(thinking="high").thinking == "high"
+
+
+def test_public_resume_keeps_one_pi_session_and_prior_work(tmp_path):
+    primary = ("qwenai", "deepseek-v4.1-flash")
+    alternate = ("heyroute ", "grok-4.7")
+    first = []
+    for index in range(20):
+        first.extend(provider_attempt(*primary, index + 1, stop_reason="toolUse", settled=False))
+    first.extend(provider_attempt(
+        *primary, 21, stop_reason="error", error="HTTP 503 connection terminated", age=150,
+    ))
+    second = provider_attempt(*alternate, 22, stop_reason="stop")
+    process = RecoveryProcess([first, second], tmp_path)
+    (tmp_path / "prior-work.txt").write_text("saved work")
+    (tmp_path / "transcript.md").write_text("source transcript")
+    (tmp_path / "download-count.txt").write_text("1")
+    recovery = {
+        "selected": {"provider": primary[0], "model": primary[1], "thinking": "low",
+                     "name": "DeepSeek V4.1 Flash"},
+        "alternate": {"provider": alternate[0], "model": alternate[1], "thinking": "low",
+                       "name": "Grok 4.7"},
+        "max_additional_attempts": 2,
+    }
+    state = {
+        "initial": recovery["selected"], "current": recovery["selected"].copy(),
+        "alternate": recovery["alternate"], "recovery_scheduled": 0,
+        "recovery_count": 0, "request_count": 0, "started_at": time.time(),
+    }
+
+    final = asyncio.run(PiRunner(model_recovery=recovery)._consume(
+        process, tmp_path, "generate report", model_recovery=recovery,
+        model_state=state, deadline=time.monotonic() + 1800,
+    ))
+
+    assert final["provider"] == alternate[0] and final["model"] == alternate[1]
+    assert len(process.prompts) == 2
+    assert "不要重跑下载、ASR" in process.prompts[1]
+    assert len(process.model_commands) == 1
+    assert process.model_commands[0]["provider"] == alternate[0]
+    assert (tmp_path / "prior-work.txt").read_text() == "saved work"
+    assert (tmp_path / "download-count.txt").read_text() == "1"
+    saved = [json.loads(line) for line in (tmp_path / "pi.events.jsonl").read_text().splitlines()]
+    assert sum(event.get("type") == "message_end" for event in saved) == 22
+    attempts = [
+        json.loads(line)
+        for line in (tmp_path / "model-attempts.jsonl").read_text().splitlines()
+    ]
+    starts = [event for event in attempts if event["kind"] == "request_started"]
+    assert len(starts) == 22
+    assert starts[-1]["provider"] == alternate[0]
+    assert starts[-1]["recovery_number"] == 1
+    assert state["recovery_count"] == 1
+
+
+def test_public_recovery_allows_two_extra_attempts_and_does_not_return_to_primary(tmp_path):
+    primary = ("qwenai", "deepseek-v4.1-flash")
+    alternate = ("heyroute ", "grok-4.7")
+    steps = [
+        provider_attempt(*primary, 1, stop_reason="error", error="HTTP 503 unavailable", age=2),
+        provider_attempt(*primary, 2, stop_reason="error", error="HTTP 503 unavailable", age=2),
+        provider_attempt(*alternate, 3, stop_reason="error", error="HTTP 503 unavailable", age=2),
+    ]
+    process = RecoveryProcess(steps)
+    recovery = {
+        "selected": {"provider": primary[0], "model": primary[1], "thinking": "low",
+                     "name": "DeepSeek V4.1 Flash"},
+        "alternate": {"provider": alternate[0], "model": alternate[1], "thinking": "low",
+                       "name": "Grok 4.7"},
+        "max_additional_attempts": 2,
+    }
+    state = {
+        "initial": recovery["selected"], "current": recovery["selected"].copy(),
+        "alternate": recovery["alternate"], "recovery_scheduled": 0,
+        "recovery_count": 0, "request_count": 0, "started_at": time.time(),
+    }
+
+    with pytest.raises(PiError) as error:
+        asyncio.run(PiRunner(model_recovery=recovery)._consume(
+            process, tmp_path, "generate report", model_recovery=recovery,
+            model_state=state, deadline=time.monotonic() + 1800,
+        ))
+
+    assert error.value.failure_category == "transient_provider_failure"
+    assert len(process.prompts) == 3
+    assert len(process.model_commands) == 1
+    assert process.current_model == alternate
+    assert state["recovery_scheduled"] == 2
+    assert state["recovery_count"] == 2
+    attempts = [
+        json.loads(line)
+        for line in (tmp_path / "model-attempts.jsonl").read_text().splitlines()
+    ]
+    assert len([event for event in attempts if event["kind"] == "request_started"]) == 3
+    assert len([event for event in attempts if event["kind"] == "recovery_scheduled"]) == 2
+
+
+@pytest.mark.parametrize("message,expected", [
+    ({"provider": "qwenai", "stopReason": "error",
+      "errorMessage": "HTTP 400 data_inspection_failed: input data"},
+     ("input_content_rejected", "data_inspection_failed", 400)),
+    ({"provider": "qwenai", "stopReason": "error",
+      "errorMessage": "data_inspection_failed: Output data may contain inappropriate content."},
+     ("output_content_rejected", "data_inspection_failed", None)),
+    ({"provider": "heyroute ", "stopReason": "error",
+      "errorMessage": "Stream ended without finish_reason: terminated"},
+     ("transient_provider_failure", None, None)),
+    ({"provider": "qwenai", "stopReason": "error",
+      "errorMessage": "HTTP 401 invalid_api_key"},
+     ("auth_or_quota_failure", "invalid_api_key", 401)),
+    ({"provider": "qwenai", "stopReason": "error",
+      "errorMessage": "unexpected response"},
+     ("unknown_provider_failure", None, None)),
+])
+def test_public_provider_failure_classification(message, expected):
+    assert _provider_failure(message) == expected
+
+
+@pytest.mark.parametrize("category,count,seconds,expected_action", [
+    ("input_content_rejected", 1, 2, "switch_model"),
+    ("output_content_rejected", 1, 2, "retry_model"),
+    ("output_content_rejected", 2, 2, "switch_model"),
+    ("transient_provider_failure", 1, 2, "retry_model"),
+    ("transient_provider_failure", 1, 150, "switch_model"),
+    ("unknown_provider_failure", 1, 2, None),
+])
+def test_public_recovery_action_matrix(category, count, seconds, expected_action):
+    initial = {"provider": "qwenai", "model": "deepseek-v4.1-flash"}
+    alternate = {"provider": "heyroute ", "model": "grok-4.7"}
+    selected = PiRunner._select_recovery(category, initial, initial, alternate, count, seconds)
+    assert (selected[0] if selected else None) == expected_action
+
+
+@pytest.mark.parametrize("cancelled,remaining,expected", [
+    (False, 60, "recovery_time_budget_exhausted"),
+    (True, 900, "cancelled"),
+])
+def test_public_recovery_stops_before_request_when_time_or_cancel_blocks(
+    tmp_path, cancelled, remaining, expected,
+):
+    primary = ("qwenai", "deepseek-v4.1-flash")
+    alternate = ("heyroute ", "grok-4.7")
+    process = RecoveryProcess([provider_attempt(
+        *primary, 1, stop_reason="error", error="HTTP 503 unavailable", age=2,
+    )])
+    if cancelled:
+        (tmp_path / "cancel.requested").touch()
+    recovery = {
+        "selected": {"provider": primary[0], "model": primary[1], "thinking": "low"},
+        "alternate": {"provider": alternate[0], "model": alternate[1], "thinking": "low"},
+        "max_additional_attempts": 2, "min_remaining_seconds": 120,
+    }
+    state = {
+        "initial": recovery["selected"], "current": recovery["selected"].copy(),
+        "alternate": recovery["alternate"], "recovery_scheduled": 0,
+        "recovery_count": 0, "request_count": 0, "started_at": time.time(),
+    }
+
+    with pytest.raises(PiError) as error:
+        asyncio.run(PiRunner(model_recovery=recovery)._consume(
+            process, tmp_path, "generate report", model_recovery=recovery,
+            model_state=state, deadline=time.monotonic() + remaining,
+        ))
+
+    assert error.value.failure_category == expected
+    assert len(process.prompts) == 1
+    assert state["recovery_scheduled"] == 0
+
+
+def test_public_recovery_settings_are_run_scoped(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "auth.json").write_text('{"qwenai":{"type":"api_key","key":"fixture"}}')
+    (config / "models.json").write_text('{"providers":{}}')
+    monkeypatch.setattr("video_report_agent.pi.PI_AGENT_DIR", config)
+
+    run_config = PiRunner._prepare_recovery_config(tmp_path / "run")
+
+    settings = json.loads((run_config / "settings.json").read_text())
+    assert settings["retry"]["enabled"] is False
+    assert settings["retry"]["maxRetries"] == 0
+    assert settings["retry"]["provider"] == {"maxRetries": 0, "timeoutMs": 600000}
+    assert (run_config / "auth.json").resolve() == (config / "auth.json").resolve()
+    assert (run_config / "models.json").resolve() == (config / "models.json").resolve()
+    assert json.loads((config / "auth.json").read_text())["qwenai"]["type"] == "api_key"
 
 
 def test_review_is_opt_in_and_evaluation_can_override(monkeypatch):

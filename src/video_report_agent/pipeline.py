@@ -41,6 +41,7 @@ def create_run(
     ocr_roi=None,
     subtitle_file=None,
     model_selection=None,
+    model_recovery=None,
     asr_backend=None,
     asr_model=None,
     ocr_backend=None,
@@ -63,6 +64,7 @@ def create_run(
         run / "input.json",
         {
             **({"model_selection": model_selection} if model_selection else {}),
+            **({"model_recovery": model_recovery} if model_recovery else {}),
             **media_config,
             "url": source.canonical_url,
             "video_id": source.video_id,
@@ -80,6 +82,8 @@ def create_run(
             "state": "QUEUED",
             "stage": "QUEUED",
             "started_at": time.time(),
+            **({"model_name": model_recovery.get("selected", {}).get("name")}
+               if model_recovery else {}),
         },
     )
     if subtitle_file:
@@ -199,7 +203,10 @@ def generate(run: Path) -> dict:
             with trace.span("transcript") as detail:
                 detail.update(reused_from=transcript_source, output={"artifact": "transcript.md"})
         update("GENERATING")
-        runner = PiRunner(**metadata.get("model_selection", {}))
+        runner_options = dict(metadata.get("model_selection", {}))
+        if metadata.get("model_recovery"):
+            runner_options["model_recovery"] = metadata["model_recovery"]
+        runner = PiRunner(**runner_options)
         with trace.span("agent", backend=runner.provider, model=runner.model,
                         input={"artifact": "transcript.md"}) as detail:
             asyncio.run(runner.run(run))

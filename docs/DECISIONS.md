@@ -12,9 +12,17 @@
 
 完成以 `agent_settled`、最终正常停止及 HTML 交付条件为准。源码明确指出 `agent_end` 后仍可能重试或压缩。程序检查与语义质量分开，默认不开额外 review；并未承诺自动修复或自动验收。
 
+## 2026-09-27：调用方可显式启用同会话的有限模型恢复
+
+决定：只有任务输入提供 `model_recovery` 时，PiRunner 才在任务级配置中关闭 Pi 的 Agent/Provider 自动重试，并在同一 Pi 进程与 session 中按策略续试或切模型；逐次请求写入 `model-attempts.jsonl`，不保存新请求正文，也不改共享 Pi 配置。未提供策略的 CLI/Local 路径维持原行为。恢复不改变 `agent_settled`、最终 `stopReason == "stop"` 与完整 HTML 检查等完成条件，总时限沿用调用方 deadline。依据：[pi.py](../src/video_report_agent/pi.py)、[execution.py](../src/video_report_agent/execution.py)。代价：调用方需提供精确备用 provider/model 与恢复预算；进程重启恢复仍由 Service 生命周期策略决定。
+
 ## 2026-09-15：阶段日志与 Agent 事件分层
 
 决定：`run.trace.jsonl` 记录管线，`pi.events.jsonl` 保存模型与工具细节。依据：`f8274ec` 与现行 AGENTS。工程解释：阶段耗时和 Agent 行为需要不同粒度；代价是分析时需要关联两份日志，客户端时间不能证明供应商内部排队或推理时间。
+
+## 2026-09-27：DeepSeek V4.1 Flash 费用窗口沿用供应商时钟边界
+
+决定：QwenAI DeepSeek V4.1 Flash 的人民币估算使用北京时间 08:00–22:00 忙时、其余时间闲时；不再把工作日、法定节假日和既有本地费率时段混入计算。依据：[usage.py](../src/video_report_agent/usage.py) 与[百炼价目表](https://help.aliyun.com/zh/model-studio/model-pricing)，页面给出忙闲时钟窗口但没有列日历例外。Service 的 Public 路由复用同一时段函数。代价：金额仍是 token 用量估算，不代表账号账单；价目或供应商规则变化后需重新核对并同步路由与估算。
 
 ## 2026-09-17：长音频按静音边界分两段
 

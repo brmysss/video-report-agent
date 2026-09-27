@@ -162,12 +162,12 @@ def priced_message(model, at="2026-09-21T09:00:00+08:00", **counts):
 
 
 @pytest.mark.parametrize("at,factor", [
-    ("2026-09-21T08:59:59+08:00", 1), ("2026-09-21T09:00:00+08:00", 2),
-    ("2026-09-21T12:00:00+08:00", 1), ("2026-09-21T14:00:00+08:00", 2),
-    ("2026-09-21T18:00:00+08:00", 1), ("2026-09-20T10:00:00+08:00", 1),
-    ("2026-09-25T10:00:00+08:00", 1),
+    ("2026-09-21T07:59:59+08:00", 1), ("2026-09-21T08:00:00+08:00", 2),
+    ("2026-09-21T12:00:00+08:00", 2), ("2026-09-21T14:00:00+08:00", 2),
+    ("2026-09-21T21:59:59+08:00", 2), ("2026-09-21T22:00:00+08:00", 1),
+    ("2026-09-20T10:00:00+08:00", 2), ("2026-10-01T10:00:00+08:00", 2),
 ])
-def test_qwenai_deepseek_peak_cache_and_holidays(at, factor):
+def test_qwenai_deepseek_official_peak_window_and_holidays(at, factor):
     result = usage.cny_cost(priced_message("deepseek-v4.1-flash", at))
     assert result["total"] == pytest.approx(0.0024 * factor)
     assert result["currency"] == "CNY"

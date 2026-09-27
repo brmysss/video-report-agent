@@ -9,7 +9,6 @@ description = "Bilibili to HTML reports with ASR and Pi RPC"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "chinese-calendar>=1.11.0",
     "httpx>=0.28.1",
     "opencc-python-reimplemented>=0.1.7",
     "playwright>=1.62.0",

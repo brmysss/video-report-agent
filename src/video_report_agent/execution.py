@@ -23,14 +23,16 @@ def generate(run: Path, *, timeout=RUN_TIMEOUT_SECONDS, env: dict[str, str] | No
         "from video_report_agent.pipeline import generate; generate(Path(sys.argv[1]))",
         str(run),
     ]
+    deadline = time.monotonic() + timeout
+    worker_env = {**os.environ, **env} if env is not None else os.environ.copy()
+    worker_env["VIDEO_REPORT_RUN_DEADLINE"] = str(deadline)
     with (run / "worker.log").open("ab") as log:
         process = subprocess.Popen(
             command, stdout=log, stderr=log, start_new_session=True,
-            env={**os.environ, **env} if env is not None else None,
+            env=worker_env,
         )
         timed_out = False
         cancelled = False
-        deadline = time.monotonic() + timeout
         try:
             while process.poll() is None:
                 if (run / "cancel.requested").exists():

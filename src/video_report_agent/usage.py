@@ -4,15 +4,13 @@ import json
 import math
 import os
 import tempfile
-from functools import lru_cache
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from chinese_calendar import is_holiday
-
 # Bump for schema OR counting/pricing semantics changes, even if fields stay identical.
-USAGE_CACHE_VERSION = 2
+USAGE_CACHE_VERSION = 3
 
 
 def read_object(path):
@@ -28,6 +26,12 @@ def number(value):
         isinstance(value, (int, float)) and not isinstance(value, bool)
         and math.isfinite(value) and value >= 0
     )
+
+
+def is_deepseek_v41_busy_hour(at):
+    """Official DeepSeek V4.1 Flash pricing window in Beijing time (08:00–22:00)."""
+    local = datetime.fromtimestamp(at, ZoneInfo("Asia/Shanghai"))
+    return 8 <= local.hour < 22
 
 
 def cny_cost(message, received_at=None):
@@ -49,18 +53,17 @@ def cny_cost(message, received_at=None):
     input_tokens, output, cached, written = counters
     period = None
     if model == "deepseek-v4.1-flash":
-        # Pi message.timestamp is request-start epoch milliseconds.
+        # Pi message.timestamp is request-start epoch milliseconds. Alibaba's current
+        # pricing page defines the busy window by clock time, without weekday/holiday
+        # exceptions: https://help.aliyun.com/zh/model-studio/model-pricing
         timestamp = message.get("timestamp")
         at = timestamp / 1000 if number(timestamp) else received_at
         if not number(at) or written:
             return None
         try:
-            local = datetime.fromtimestamp(at, ZoneInfo("Asia/Shanghai"))
-            holiday = is_holiday(local.date())
+            peak = is_deepseek_v41_busy_hour(at)
         except (ValueError, OverflowError, OSError, NotImplementedError):
             return None
-        peak = (local.weekday() < 5 and not holiday
-                and (9 <= local.hour < 12 or 14 <= local.hour < 18))
         factor = 2 if peak else 1
         rates = (1 * factor, 4 * factor, 0.1 * factor, 0)
         period = "peak" if peak else "off_peak"
