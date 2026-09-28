@@ -29,7 +29,7 @@ def number(value):
 
 
 def is_deepseek_v41_busy_hour(at):
-    """Official DeepSeek V4.1 Flash pricing window in Beijing time (08:00–22:00)."""
+    """QwenAI/Alibaba's daily Beijing busy window for DeepSeek V4.1 Flash (08:00–22:00)."""
     local = datetime.fromtimestamp(at, ZoneInfo("Asia/Shanghai"))
     return 8 <= local.hour < 22
 
