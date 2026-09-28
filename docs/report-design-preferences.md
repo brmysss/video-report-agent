@@ -69,3 +69,13 @@
 2026-09-24，用户采纳 `frp-label-clearance` 局部方案。三节点图的箭头间隙短于关系标签时，把标签放到节点上方留白，并保持与对应连线对齐；不让标签压住节点上沿。只按实际文字长度和图的留白定位，不把案例中的 SVG 坐标当成通用值。
 
 适用于 Standard 中横向节点图的同类拥挤情况。代价是标签离箭头稍远，需要用位置和顺序维持对应关系。已验证一份真实内容的局部小样和原/候选切换；未重生成历史报告，也未验证其他节点数量或线上后续生成效果。生成入口为 [Standard 模式规则](../src/video_report_agent/skills/video-report/modes/standard.md)与[模板图示提示](../src/video_report_agent/skills/video-report/assets/report-template.html)。
+
+## Standard：长依据核验行与对照表的选择
+
+2026-09-28，用户选定 `six-narratives-ledger` 的 A2 阅读方向，并要求去掉数字左侧的小点、明确两类表格的使用边界。
+
+- 多个对象共享字段、数值或尺度，读者需要跨项对齐比较时，保留浅蓝表头、白底正文行的表格。
+- 少量并列事项各有较长依据和独立判断，主要逐项阅读时，可用双区核验行：左侧事项和状态，右侧先判断、后依据。小编号仅供定位；只用留白分组，不在每条之间重复长横线或增加编号旁的小点，以保留章节标题横线的层级。
+- 取舍：双区行使判断与依据相邻，但跨事项对照同一字段不如表格。简短条目仍用普通列表；长篇分类解释沿用分类详解组件。
+
+生成入口为 [Standard 模式规则](../src/video_report_agent/skills/video-report/modes/standard.md)和[Standard 模板](../src/video_report_agent/skills/video-report/assets/report-template.html)中的 `.evidence-rows`。已在本地实际模板中用六条代表性内容检查 1280px 桌面渲染；未重生成历史报告，也未验证其他内容或线上后续生成效果。Brief 不受此选择影响。
