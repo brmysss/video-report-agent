@@ -88,6 +88,7 @@ def _provider_failure(message: dict) -> tuple[str, str | None, int | None]:
         or (http_status is not None and http_status >= 500)
         or any(term in lowered for term in (
             "terminated", "stream ended without finish_reason", "timed out", "timeout",
+            "responses stream ended before a terminal response event",
             "connection reset", "connection refused", "econnreset", "econnrefused",
             "socket hang up", "network error", "unexpected eof",
         ))

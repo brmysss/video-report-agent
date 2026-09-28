@@ -195,6 +195,53 @@ def test_public_recovery_allows_two_extra_attempts_and_does_not_return_to_primar
     assert len([event for event in attempts if event["kind"] == "recovery_scheduled"]) == 2
 
 
+@pytest.mark.parametrize("age,retry_count", [(2, 1), (164.93, 0)])
+def test_grok_responses_stream_failure_recovers_to_deepseek(tmp_path, age, retry_count):
+    primary = ("heyroute ", "grok-4.7")
+    alternate = ("qwenai", "deepseek-v4.1-flash")
+    steps = []
+    for index in range(retry_count + 1):
+        events = provider_attempt(
+            *primary, index + 1, stop_reason="error", age=age,
+            error="OpenAI Responses stream ended before a terminal response event",
+        )
+        events[1]["message"].update(
+            api="openai-responses",
+            content=[{"type": "text", "text": "Transcript read; preparing the report."}],
+        )
+        steps.append(events)
+    steps.append(provider_attempt(*alternate, retry_count + 2, stop_reason="stop"))
+    process = RecoveryProcess(steps)
+    recovery = {
+        "selected": {"provider": primary[0], "model": primary[1], "thinking": "low"},
+        "alternate": {"provider": alternate[0], "model": alternate[1], "thinking": "low"},
+        "max_additional_attempts": 2,
+    }
+    state = {
+        "initial": recovery["selected"], "current": recovery["selected"].copy(),
+        "alternate": recovery["alternate"], "recovery_scheduled": 0,
+        "recovery_count": 0, "request_count": 0, "started_at": time.time(),
+    }
+    final = asyncio.run(PiRunner(model_recovery=recovery)._consume(
+        process, tmp_path, "generate report", model_recovery=recovery,
+        model_state=state, deadline=time.monotonic() + 1800,
+    ))
+    assert (final["provider"], final["model"]) == alternate
+    assert len(process.prompts) == retry_count + 2
+    assert len(process.model_commands) == 1
+    assert process.current_model == alternate
+    attempts = [json.loads(line) for line in
+                (tmp_path / "model-attempts.jsonl").read_text().splitlines()]
+    actions = [event["action"] for event in attempts if event["kind"] == "recovery_scheduled"]
+    assert actions == ["retry_model"] * retry_count + ["switch_model"]
+    failures = [event for event in attempts if event["kind"] == "request_finished"
+                and event["stop_reason"] == "error"]
+    assert all(event["failure_category"] == "transient_provider_failure" for event in failures)
+    starts = [event for event in attempts if event["kind"] == "request_started"]
+    assert starts[-1]["model"] == alternate[1]
+    assert state["recovery_count"] == retry_count + 1
+
+
 @pytest.mark.parametrize("message,expected", [
     ({"provider": "qwenai", "stopReason": "error",
       "errorMessage": "HTTP 400 data_inspection_failed: input data"},
